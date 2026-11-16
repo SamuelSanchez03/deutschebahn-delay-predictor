@@ -1,0 +1,374 @@
+# 🚆 ¿Llegará tarde mi tren? — Predicción de retrasos de Deutsche Bahn
+
+Pipeline de Big Data con arquitectura **Medallion** (Bronze → Silver → Gold) sobre **más de 200 millones de registros** de paradas de trenes en Alemania. El pipeline entrena un modelo de clasificación que estima la probabilidad de que un tren llegue con más de 5 minutos de retraso. El modelo se publica como **API REST** (FastAPI + Docker) y se consulta desde una **página web** con mapas de puntualidad.
+
+> 🚧 **Proyecto en construcción.** La sección [Estado del proyecto](#estado-del-proyecto) indica qué partes ya funcionan.
+
+---
+
+## Contenido
+
+1. [Problema y objetivo](#problema-y-objetivo)
+2. [Datos](#datos)
+3. [Arquitectura](#arquitectura)
+4. [Pipeline Medallion](#pipeline-medallion)
+5. [Modelo](#modelo)
+6. [API del modelo](#api-del-modelo)
+7. [Aplicación web](#aplicación-web)
+8. [Estructura del repositorio](#estructura-del-repositorio)
+9. [Cómo reproducir el proyecto](#cómo-reproducir-el-proyecto)
+10. [Costos](#costos)
+11. [Decisiones de diseño](#decisiones-de-diseño)
+12. [Estado del proyecto](#estado-del-proyecto)
+13. [Atribución y licencias](#atribución-y-licencias)
+
+---
+
+## Problema y objetivo
+
+**Pregunta:** *dado el tipo de tren, la estación, la línea, el día y la hora, ¿qué tan probable es que el tren llegue con retraso?*
+
+- **Tipo de tarea:** clasificación binaria.
+- **Etiqueta:** `label = 1` si `delay_in_min > 5`. Deutsche Bahn considera puntual un tren con menos de 6 minutos de retraso.
+- **Uso:** una persona elige estación, línea, día y hora en la web; la web consulta la API y muestra la probabilidad de retraso.
+
+## Datos
+
+| Fuente | Contenido | Licencia |
+|---|---|---|
+| [`piebro/deutsche-bahn-data`](https://huggingface.co/datasets/piebro/deutsche-bahn-data) (Hugging Face) | Un parquet por mes con cada parada de tren: horarios planeados, retraso, cancelaciones, tipo y línea | CC BY 4.0 |
+| [`db-stations`](https://github.com/derhuerst/db-stations) (npm) | Coordenadas de las estaciones por número EVA | CC BY 4.0 |
+
+**Volumen** (medido con `ingest/measure_dataset.py` el 2026-11-14):
+
+| Periodo | Archivos | Tamaño | Filas | Cobertura |
+|---|---|---|---|---|
+| 2024-07 → 2025-10 | 16 | 0.97 GB | 31.7 M (≈2 M/mes) | ~100 estaciones principales |
+| 2025-11 → 2026-10 | 12 | 4.32 GB | 178.6 M (≈15 M/mes) | Todas las estaciones |
+| **Total** | **28** | **5.29 GB** | **210.3 M** | |
+
+En noviembre de 2025 el autor del dataset amplió la cobertura a todas las estaciones. Por eso el proyecto trabaja con las **~100 estaciones core**, que son las únicas con historia completa desde 2024-07.
+
+## Arquitectura
+
+```mermaid
+flowchart LR
+    HF[(Hugging Face<br/>parquet mensual)] -->|GitHub Actions<br/>cron mensual| S3L[(AWS S3<br/>landing/)]
+    NPM[(db-stations)] -->|GitHub Actions| S3L
+    S3L -->|boto3| VOL[(Databricks<br/>UC Volume)]
+    subgraph Databricks [Databricks Free Edition · Spark + Delta Lake]
+        VOL -->|Auto Loader| B[Bronze]
+        B --> S[Silver]
+        S --> G[Gold]
+        G --> ML[Entrenamiento<br/>MLflow]
+    end
+    ML -->|modelo + tablas de features| S3E[(AWS S3<br/>exports/)]
+    G -->|agregados para mapas| S3E
+    S3E --> API[API FastAPI<br/>Docker]
+    S3E --> WEB[Web<br/>GitHub Pages]
+    WEB -->|POST /predict| API
+```
+
+| Componente | Herramienta | Función |
+|---|---|---|
+| Ingesta programada | GitHub Actions | Descarga mensual de Hugging Face y npm a S3 |
+| Data lake | AWS S3 | `landing/` (datos crudos) y `exports/` (modelo y agregados) |
+| Procesamiento | Databricks Free Edition (PySpark, Delta Lake, Unity Catalog, Auto Loader) | Capas Bronze, Silver y Gold |
+| Orquestación | Databricks Jobs + GitHub Actions | Pipeline mensual de punta a punta |
+| Experimentos | MLflow | Registro de corridas, métricas y modelo |
+| Publicación del modelo | FastAPI + Docker | API REST documentada con OpenAPI |
+| Visualización | HTML + Leaflet + ECharts en GitHub Pages | Mapas, tendencias y buscador de predicciones |
+
+## Pipeline Medallion
+
+Esquemas `bronze`, `silver` y `gold` en Unity Catalog (catálogo `workspace`).
+
+### Puente S3 → Volume
+Databricks Free Edition no permite registrar buckets externos, así que un notebook copia los archivos de S3 a un Volume de Unity Catalog. En ese paso se corrige el tipo de las columnas de tiempo (nanosegundos → microsegundos), porque Spark no puede leer el formato original.
+
+### Bronze — los datos tal como llegaron
+- `bronze.train_stops`: Auto Loader lee los parquet del Volume de forma incremental (solo archivos nuevos o modificados). No se limpia ni se filtra nada; se agregan columnas de linaje (`_source_file`, `_file_modified_at`, `_ingested_at`).
+- `bronze.stations`: coordenadas de `db-stations`, se reescribe completa en cada corrida.
+
+| Tabla | Filas | Notas |
+|---|---|---|
+| `bronze.train_stops` | **210,288,625** | 28 meses (2024-07 → 2026-10); coincide exactamente con la fuente |
+| `bronze.stations` | 5,388 | Incluye EVAs alternativos y estado federal |
+
+Las columnas de tiempo quedan como `timestamp_ntz` (sin zona horaria): ya están en hora local alemana, así que `hour()` y `dayofweek()` dan la hora y el día correctos sin conversiones.
+
+### Silver — datos limpios y confiables
+Antes de limpiar, `04_bronze_profile` midió cada problema sobre las 210 M filas de Bronze. Cada regla de Silver responde a un hallazgo medido:
+
+| Hallazgo en Bronze | Tratamiento en Silver | Justificación |
+|---|---|---|
+| **Duplicados:** 0 `id` repetidos | Deduplicar por `id` conservando la versión ingerida más reciente | Si el autor reprocesa un mes, Bronze recibe las filas otra vez |
+| **Nulos:** 1.49 M filas (0.7%) sin tipo de tren, sin retraso y sin hora planeada (son las mismas filas) | Se descartan | No se puede saber qué tren era ni cuándo pasaba |
+| **Nulos esperados:** llegada o salida planeada nula (~10.5% cada una) | `planned_time = coalesce(llegada, salida)` | La primera parada no tiene llegada y la última no tiene salida |
+| **Outliers:** retrasos de −1,446 a 2,795 min (p50 = 1, p99 = 35, p99.9 = 86) | Bandera `dq_delay_outlier` si > 300 o < −30 min (~8.8 mil filas) | Se marcan en vez de borrarse para poder auditarlos; se excluyen del modelo. Los retrasos de −30 a 0 (trenes que llegan antes) se conservan |
+| **Cancelaciones:** 8.5 M paradas (4%), casi todas con `delay_in_min` | Bandera `is_canceled`; se excluyen del label y se cuentan aparte | El retraso de una parada cancelada no tiene significado |
+| **Llaves inconsistentes:** EVA `08000001` en el dataset vs `8000001` en db-stations (match **0 de 146**) | `CAST(eva AS BIGINT)` en ambos lados | Sin normalizar, ninguna estación tendría coordenadas |
+| **Categorías sucias:** 302 valores de `train_type`, muchos escritos a mano (`SEV`, `Bvs`, `bUS`…) | `train_category` = Bus / Larga distancia / S-Bahn / Regional, por reglas con prioridad | Agrupa operadores regionales y variantes de bus de reemplazo; los buses se excluyen del modelo |
+| **Tipos:** horas como `timestamp_ntz` (hora alemana, sin zona) | `hour`, `dow`, `month` y `service_date` se derivan directamente | No hace falta convertir zona horaria |
+
+Silver conserva **todas las estaciones** con la bandera `is_core_station`, que marca las **146 estaciones** presentes antes de 2025-11 (~55 M filas). El mapa de tramos necesita estaciones consecutivas; el modelo filtra a las core en Gold. La tabla usa *liquid clustering* por `(service_date, eva)`.
+
+**Resultados:**
+
+| Paso | Filas |
+|---|---|
+| Bronze | 210,288,625 |
+| − duplicados por `id` | 0 |
+| − sin tipo de tren ni hora planeada | 1,491,887 |
+| **= `silver.train_stops`** | **208,796,738** (5,459 estaciones) |
+| de ellas, estaciones core | 54,759,917 (146 estaciones) |
+
+| Métrica de calidad | Valor |
+|---|---|
+| Paradas canceladas | 8,488,020 (4.1%) |
+| Outliers de retraso marcados | 9,674 (0.005%) |
+| Paradas con retraso > 5 min (sin canceladas ni outliers) | ≈ 16% → clases desbalanceadas |
+| Match de coordenadas, estaciones core | 137 de 146 estaciones, **99.9% de las filas** |
+| Match de coordenadas, resto | 5,281 de 5,313 estaciones, 99.6% de las filas |
+
+| Categoría | Todas | Core |
+|---|---|---|
+| Regional | 98.3 M | 24.8 M |
+| S-Bahn | 98.1 M | 22.6 M |
+| Larga distancia | 6.8 M | 6.0 M |
+| Bus (excluido del modelo) | 5.6 M | 1.4 M |
+
+Las 9 estaciones core sin coordenadas tienen muy poco volumen: varias no tienen nombre o tienen EVAs fuera del rango alemán. En `gold.data_quality_monthly` todos los meses tienen datos en todas sus horas; marzo tiene 743 horas por el cambio de horario de verano. Aparecen además unas pocas filas en 2024-06 y 2026-11: son trenes de la última noche del mes con hora planeada en el mes contiguo.
+
+Tablas adicionales:
+- `silver.dim_station`: EVA → nombre oficial, coordenadas, estado federal. Incluye los EVAs alternativos (`additionalIds`).
+- `gold.data_quality_monthly`: filas, filas core, estaciones, cancelaciones, nulos, outliers, horas con datos y % de retraso por mes.
+
+### Gold — tablas listas para consumir
+Base común: **paradas válidas** de Silver (no canceladas, sin outlier, sin buses). **Label:** `delay_in_min > 5`.
+
+| Tabla | Grano | Filas | Uso |
+|---|---|---|---|
+| `gold.station_daily` | estación × día | 1,927,249 | Mapa de puntualidad y tendencias (% puntual, retraso promedio, p90, % cancelado) |
+| `gold.route_daily` | línea × día | 1,160,663 | Tasas históricas por línea |
+| `gold.segments` | par de estaciones consecutivas | 2,569 | Mapa de tramos: `delay_gain` = retraso en la parada − retraso en la anterior. Datos desde 2025-11, ≥ 200 viajes por tramo |
+| `gold.model_stations` | estación | 131 | Estaciones core con coordenadas y activas en los últimos 3 meses |
+| `gold.holidays` | estado × fecha | 697 | Festivos nacionales y estatales (librería `holidays`) |
+| `gold.features` | parada | **50,127,006** | Tabla de entrenamiento sin *leakage* |
+| `gold.data_quality_monthly` | mes | 29 | Métricas de calidad (ver Silver) |
+
+En `gold.features` la tasa de retraso es **19.0%**: Regional 20.1%, S-Bahn 11.4% y **Larga distancia 44.3%**. Los trenes de larga distancia recorren cientos de kilómetros y van acumulando retraso.
+
+## Modelo
+
+- **Features:** estación, estado federal, categoría y tipo de tren (los tipos con menos de 50 mil paradas se agrupan en `OTHER`), hora, día de la semana, mes, fin de semana, festivo **del estado de la estación**, posición en la ruta, y cinco tasas históricas de retraso: estación (7 y 28 días), estación a esa hora (28 días) y línea (7 y 28 días).
+- **Sin leakage:** cada feature se conoce *antes* de que llegue el tren. Las tasas históricas se calculan con ventanas `rangeBetween(-N, -1)` que **terminan el día anterior**, y se suavizan hacia la tasa global (`(retrasos + 20·global) / (paradas + 20)`) para que las líneas con pocas observaciones no den tasas extremas. El notebook lo verifica: en el primer día de cada estación, sin historia, la tasa es exactamente la global.
+- **Señal de las features:** correlación con el label de 0.25 a 0.30. La más fuerte es la tasa de la línea en 28 días (0.298).
+- **Codificación:** las variables categóricas (estación, tipo de tren) se indexan; la línea entra por sus tasas históricas porque tiene miles de valores distintos. Los modelos de árboles no requieren normalizar; la regresión logística sí se estandariza.
+- **Split temporal:** entrenamiento con el pasado, validación con el penúltimo mes y prueba con el último. Nunca aleatorio, para no "filtrar el futuro".
+- **Modelos:** baseline (tasa histórica de la línea) → regresión logística (Spark ML) → **LightGBM** (modelo publicado).
+- **Métrica principal: AUC-PR.** Las clases están desbalanceadas (la mayoría de los trenes llegan a tiempo), y AUC-PR mide qué tan bien se detecta la clase minoritaria sin dejarse inflar por los verdaderos negativos. También se reporta **F1** al umbral elegido, AUC-ROC y una curva de calibración, porque la web muestra probabilidades.
+
+> 🚧 Resultados: pendiente.
+
+## API del modelo
+
+> 🚧 En construcción.
+
+Servicio FastAPI empaquetado en Docker:
+
+| Endpoint | Método | Descripción |
+|---|---|---|
+| `/predict` | POST | Recibe estación, tipo de tren, línea, día y hora; devuelve la probabilidad de retraso |
+| `/health` | GET | Estado del servicio y versión del modelo |
+| `/docs` | GET | Documentación interactiva (Swagger / OpenAPI) |
+
+Las entradas se validan con Pydantic (rangos de hora y día, estación existente), y las peticiones inválidas reciben un `422` con el detalle del error.
+
+## Aplicación web
+
+> 🚧 En construcción.
+
+Página estática con un mapa de puntualidad por estación, un mapa de los tramos donde se genera el retraso, una gráfica de tendencia y un buscador de "probabilidad de que mi tren llegue tarde". La web **llama a la API** para cada predicción y maneja tiempos de espera, reintentos y respuestas inválidas.
+
+## Estructura del repositorio
+
+```text
+db-delay-predictor/
+├── README.md
+├── environment.yml           # Entorno conda local
+├── docs/
+│   ├── aws/                  # Políticas IAM de mínimo privilegio
+│   └── img/                  # Capturas para el README
+├── scripts/                  # Verificación de permisos de AWS y ejecución de notebooks
+├── ingest/                   # Hugging Face + db-stations → S3
+├── databricks/               # Notebooks del pipeline (Bronze, Silver, Gold, ML)
+├── api/                      # FastAPI + Dockerfile
+├── web/                      # HTML + JS + CSS
+└── .github/workflows/        # Ingesta mensual y deploy
+```
+
+---
+
+## Cómo reproducir el proyecto
+
+### Requisitos
+- Cuenta de **AWS** (S3 + IAM)
+- Cuenta de **Databricks Free Edition**, verificada con LinkedIn para habilitar la salida a internet
+- Cuenta de **GitHub**
+- **Conda** (Miniconda o Anaconda), **git** y **Docker**
+
+### 1. Clonar y crear el entorno
+
+```bash
+git clone https://github.com/<usuario>/db-delay-predictor.git
+cd db-delay-predictor
+conda env create -f environment.yml
+conda activate db-delays
+```
+
+El entorno trae Python 3.12, las librerías de ingesta y el AWS CLI.
+
+### 2. Configurar AWS
+
+1. **Bucket S3** en `us-east-1`, con *Block all public access* activado. El nombre debe ser único a nivel mundial, por ejemplo `db-delays-<usuario>`.
+2. **Dos usuarios IAM**, sin acceso a la consola, cada uno con una política *inline* de mínimo privilegio (reemplaza `NOMBRE_DEL_BUCKET`):
+
+   | Usuario | Política | Permisos |
+   |---|---|---|
+   | `db-gh-actions` | [`docs/aws/policy-db-gh-actions.json`](docs/aws/policy-db-gh-actions.json) | Escribe en `landing/`, lee `exports/` |
+   | `db-databricks` | [`docs/aws/policy-db-databricks.json`](docs/aws/policy-db-databricks.json) | Lee `landing/`, escribe en `exports/` |
+
+   Para cada usuario crea un *access key* de tipo *Application running outside AWS*. **Nunca subas las llaves al repositorio.**
+3. **Alerta de costos:** Billing → Budgets → *Monthly cost budget*. Si tu cuenta tiene créditos promocionales, en las opciones avanzadas **excluye los créditos** del cálculo. Si no, el costo neto aparece en $0 y la alerta nunca se dispara.
+4. **Perfiles locales:** registra las llaves de cada usuario en un perfil con nombre (región `us-east-1`, formato `json`):
+   ```bash
+   aws configure --profile db-gh-actions
+   aws configure --profile db-databricks
+   ```
+5. **Verificación de permisos:** el script prueba lo que cada usuario debe poder hacer y también lo que debe fallar:
+   ```bash
+   scripts/check_aws_access.sh <tu-bucket>
+   ```
+   Al final deja un archivo de prueba `landing/_check.txt`. Ningún usuario puede borrar en `landing/`, así que elimínalo desde la consola de S3.
+
+### 3. Configurar Databricks
+
+1. Instala el [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install) y autentícate:
+   ```bash
+   databricks auth login --host https://<tu-workspace>.cloud.databricks.com
+   ```
+2. Crea el *secret scope* `aws` y copia ahí las llaves del perfil local `db-databricks`. Los notebooks las leen con `dbutils.secrets.get(...)`, y Databricks las oculta (`[REDACTED]`) si se imprimen:
+   ```bash
+   databricks secrets create-scope aws
+   databricks secrets put-secret aws bucket --string-value <tu-bucket>
+   printf %s "$(aws configure get aws_access_key_id --profile db-databricks)" | databricks secrets put-secret aws access_key_id
+   printf %s "$(aws configure get aws_secret_access_key --profile db-databricks)" | databricks secrets put-secret aws secret_access_key
+   databricks secrets list-secrets aws      # debe listar las 3 claves (sin mostrar valores)
+   ```
+   `printf %s` quita el salto de línea final, que de otro modo quedaría guardado como parte de la llave.
+3. Crea los esquemas y Volumes, y prueba que Databricks llega a S3. `scripts/run_notebook.py` sube los notebooks de `databricks/` a tu carpeta del workspace, los ejecuta en serverless y muestra su salida:
+   ```bash
+   python scripts/run_notebook.py 00_setup      # esquemas bronze/silver/gold/ml + volumes
+   python scripts/run_notebook.py 01_check_s3   # debe terminar con "✅ Conectividad OK"
+   ```
+   Si `01_check_s3` falla por red o *timeout*, la cuenta de Free Edition no tiene salida a internet. Verifícala con LinkedIn o usa el respaldo: copiar a los Volumes desde GitHub Actions con el Databricks CLI.
+
+### 4. Ingesta de datos → S3
+
+`ingest/download_to_s3.py` descarga los parquet mensuales de Hugging Face y el archivo `full.ndjson` de `db-stations` (incluye EVAs alternativos y el estado federal de cada estación), y los sube a `landing/`. Es **idempotente**: solo sube un mes si no existe en S3 o si su tamaño cambió, porque el autor del dataset a veces reprocesa meses anteriores.
+
+```bash
+export AWS_PROFILE=db-gh-actions
+python ingest/measure_dataset.py                                            # meses y tamaños, sin descargar
+python ingest/download_to_s3.py --bucket <tu-bucket> --dry-run              # qué se subiría
+python ingest/download_to_s3.py --bucket <tu-bucket> --months 2024-07       # prueba con un mes
+python ingest/download_to_s3.py --bucket <tu-bucket>                        # histórico completo (≈5.3 GB)
+```
+
+Otras opciones: `--since YYYY-MM` (desde un mes), `--months-back N` (los N más recientes) y `--skip-stations`.
+
+Resultado en S3:
+```text
+s3://<tu-bucket>/landing/
+├── monthly/data-YYYY-MM.parquet
+└── stations/db-stations.ndjson
+```
+
+> 🚧 Pendiente: automatización mensual con `.github/workflows/ingest.yml`.
+
+### 5. Pipeline en Databricks
+
+Ejecuta los notebooks en orden. Cada uno es idempotente y procesa solo lo nuevo:
+
+```bash
+python scripts/run_notebook.py 02_s3_to_volume   # S3 → Volume, con conversión de timestamps
+python scripts/run_notebook.py 03_bronze         # Auto Loader → bronze.train_stops, bronze.stations
+python scripts/run_notebook.py 04_bronze_profile # perfil de calidad (nulos, duplicados, outliers, EVAs)
+python scripts/run_notebook.py 05_silver         # silver.train_stops, silver.dim_station, gold.data_quality_monthly (~15 min)
+python scripts/run_notebook.py 06_gold           # agregados, tramos, festivos y gold.features (~3 min)
+```
+
+| Notebook | Qué hace |
+|---|---|
+| `02_s3_to_volume` | Copia `landing/` de S3 al Volume `bronze.landing`. Reescribe las columnas de tiempo de nanosegundos a microsegundos (ver nota abajo) y lleva un manifiesto con el ETag de cada archivo para no reprocesar lo que no cambió |
+| `03_bronze` | Auto Loader carga los parquet nuevos a `bronze.train_stops` con columnas de linaje; `db-stations` se carga a `bronze.stations` |
+| `04_bronze_profile` | Mide duplicados, nulos por columna, distribución de retrasos, cancelaciones, tipos de tren y formato de EVA. Justifica las reglas de Silver |
+| `05_silver` | Limpieza, columnas derivadas, estaciones core, dimensión de estaciones y tabla de calidad mensual |
+| `06_gold` | Agregados por estación y línea, tramos, estaciones del modelo, festivos por estado y tabla de features con chequeo anti-leakage |
+
+> **Nota sobre tipos de dato.** Los parquet originales (escritos con DuckDB) guardan las horas como `INT64 TIMESTAMP(NANOS)`. Spark solo maneja microsegundos, y en serverless no se puede activar `spark.sql.legacy.parquet.nanosAsLong`, así que la lectura directa falla con `PARQUET_TYPE_ILLEGAL`. El puente convierte esas columnas con `pyarrow` al copiarlas al Volume. La conversión no pierde información (los horarios tienen precisión de minutos) y S3 conserva los archivos originales sin modificar.
+
+
+### 6. Entrenamiento del modelo
+
+> 🚧 Pendiente.
+
+### 7. Publicar la API
+
+> 🚧 Pendiente.
+
+### 8. Publicar la web
+
+> 🚧 Pendiente.
+
+---
+
+## Costos
+
+| Servicio | Costo estimado |
+|---|---|
+| S3 (≈5.3 GB en `landing/` + exports) | ≈ $0.12 USD/mes |
+| Transferencia de S3 a Databricks y GitHub | Dentro de los 100 GB/mes gratuitos de AWS |
+| Databricks Free Edition, GitHub Actions, GitHub Pages | $0 |
+
+## Decisiones de diseño
+
+- **S3 → Databricks con boto3 y un Volume.** Databricks Free Edition no permite registrar buckets externos en Unity Catalog. Un notebook copia los archivos de S3 a un Volume con boto3 y llaves guardadas en Databricks Secrets. Si la red de Databricks bloquea S3, el respaldo es que GitHub Actions copie al Volume con el Databricks CLI.
+- **Solo las ~100 estaciones core, con toda la historia.** Son las únicas con datos desde 2024-07. Más meses dan tasas históricas y estacionalidad más estables, y aun así superan por mucho los 4 M de registros.
+- **Dos usuarios IAM.** Cada componente solo puede hacer lo que necesita. Si se filtra una llave, se revoca solo esa.
+- **Spark para los datos, LightGBM para el modelo publicado.** Spark procesa los cientos de millones de filas. Un modelo de Spark ML necesitaría Java y Spark para servirse, lo que da una imagen Docker de más de 1 GB; LightGBM se sirve en una imagen ligera.
+- **FastAPI + Docker.** Genera la documentación OpenAPI automáticamente y valida las entradas con Pydantic; el contenedor se puede desplegar en cualquier proveedor.
+
+## Estado del proyecto
+
+- [x] Estructura del repositorio y entorno conda
+- [x] Medición del volumen del dataset
+- [x] AWS: bucket, usuarios IAM con permisos verificados
+- [x] Databricks: secret scope, esquemas, volumes y conectividad con S3 verificada
+- [x] Script de ingesta a S3 (probado con 2024-07)
+- [ ] GitHub Action de ingesta mensual
+- [x] Puente S3 → Volume con conversión de timestamps (210 M filas)
+- [x] Bronze con Auto Loader incremental
+- [x] Silver con perfil de calidad, dimensión de estaciones y tabla de calidad mensual
+- [x] Gold: agregados, tramos y features (50 M filas, sin leakage verificado)
+- [ ] Modelo con MLflow
+- [ ] API publicada
+- [ ] Web consumiendo la API
+- [ ] Job mensual de punta a punta
+
+## Atribución y licencias
+
+- Datos de trenes: Deutsche Bahn, vía [piebro/deutsche-bahn-data](https://github.com/piebro/deutsche-bahn-data) (CC BY 4.0).
+- Coordenadas de estaciones: [db-stations](https://github.com/derhuerst/db-stations) (CC BY 4.0).
+- Mapas: © OpenStreetMap contributors, © CARTO.

@@ -1,0 +1,18 @@
+# Entorno local para ingesta, pruebas de la API y utilidades.
+# Crear:      conda env create -f environment.yml
+# Actualizar: conda env update -f environment.yml --prune
+name: db-delays
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12        # misma versión que usaremos en GitHub Actions y en la imagen Docker
+  - pip
+  - pip:
+      # Ingesta (Hugging Face -> S3)
+      - huggingface_hub
+      - boto3
+      - requests
+      - pandas
+      - pyarrow
+      # Herramienta de línea de comandos de AWS
+      - awscli

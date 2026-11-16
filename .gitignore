@@ -1,0 +1,23 @@
+# Datos (nunca al repo: pesan GB y viven en S3)
+*.parquet
+*.ndjson
+web/data/*
+!web/data/.gitkeep
+
+# Artefactos del modelo (se descargan de MLflow/S3 al construir la imagen)
+api/model/*
+!api/model/.gitkeep
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Secretos — NUNCA se suben
+.env
+*.pem
+.databrickscfg
+
+# Sistema
+.DS_Store
