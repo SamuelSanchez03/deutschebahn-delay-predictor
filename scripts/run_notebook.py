@@ -17,34 +17,46 @@ import urllib.parse
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+ENV_VERSION = "4"
 
 
-def cli(*args: str) -> str:
-    res = subprocess.run(["databricks", *args, "-o", "json"], capture_output=True, text=True)
-    if res.returncode != 0:
-        sys.exit(f"Error en 'databricks {' '.join(args)}':\n{res.stderr}")
-    return res.stdout
+def cli(*args: str, retries: int = 5) -> str:
+    """Llama al Databricks CLI; reintenta ante fallas de red transitorias (DNS, timeouts)."""
+    for attempt in range(retries):
+        res = subprocess.run(["databricks", *args, "-o", "json"], capture_output=True, text=True)
+        if res.returncode == 0:
+            return res.stdout
+        transient = any(t in res.stderr for t in ("dial tcp", "timeout", "connection reset", "EOF", "503", "502"))
+        if not transient or attempt == retries - 1:
+            sys.exit(f"Error en 'databricks {' '.join(args)}':\n{res.stderr}")
+        time.sleep(10 * (attempt + 1))
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("notebook", help="Nombre del notebook en databricks/, sin .py")
     p.add_argument("--no-upload", action="store_true", help="No volver a subir los notebooks")
+    p.add_argument("--attach", type=int, metavar="RUN_ID", help="Seguir una corrida ya lanzada en vez de lanzar otra")
     args = p.parse_args()
 
     user = json.loads(cli("current-user", "me"))["userName"]
     remote_dir = f"/Users/{user}/db-delay-predictor"
 
-    if not args.no_upload:
+    if not args.no_upload and not args.attach:
         subprocess.run(["databricks", "workspace", "import-dir", str(REPO / "databricks"),
                         remote_dir, "--overwrite"], check=True, capture_output=True)
         print(f"↑ notebooks subidos a {remote_dir}")
 
+    # Serverless environment version 4: necesaria para Spark ML (pyspark.ml) en serverless
     payload = {"run_name": args.notebook,
-               "tasks": [{"task_key": "main",
+               "environments": [{"environment_key": "default", "spec": {"environment_version": ENV_VERSION}}],
+               "tasks": [{"task_key": "main", "environment_key": "default",
                           "notebook_task": {"notebook_path": f"{remote_dir}/{args.notebook}"}}]}
     print(f"▶ ejecutando {args.notebook} en serverless (espera a que termine)...")
-    run_id = json.loads(cli("jobs", "submit", "--json", json.dumps(payload), "--no-wait"))["run_id"]
+    if args.attach:
+        run_id = args.attach
+    else:
+        run_id = json.loads(cli("jobs", "submit", "--json", json.dumps(payload), "--no-wait"))["run_id"]
     t0 = time.time()
     while True:
         run = json.loads(cli("jobs", "get-run", str(run_id)))
@@ -73,7 +85,10 @@ def main() -> None:
                 print(item["data"])
         if cmd.get("error"):
             clean = re.sub(r"\x1b\[[0-9;]*m", "", cmd["error"]).strip().splitlines()
-            print("❌ ERROR en celda:\n  " + "\n  ".join(clean[-6:]))
+            # La causa suele estar en la última línea "XxxException: ..." / "XxxError: ..."
+            cause = [l for l in clean if re.match(r"^[A-Za-z0-9_.]*(Exception|Error)\b.*:", l.strip())]
+            snippet = cause[-2:] if cause else clean[-6:]
+            print("ERROR en celda:\n  " + "\n  ".join(l[:400] for l in snippet))
             failed = True
 
     if failed or state.get("result_state") != "SUCCESS":

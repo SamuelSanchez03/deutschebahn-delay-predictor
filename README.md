@@ -1,8 +1,8 @@
-# 🚆 ¿Llegará tarde mi tren? — Predicción de retrasos de Deutsche Bahn
+# ¿Llegará tarde mi tren? — Predicción de retrasos de Deutsche Bahn
 
 Pipeline de Big Data con arquitectura **Medallion** (Bronze → Silver → Gold) sobre **más de 200 millones de registros** de paradas de trenes en Alemania. El pipeline entrena un modelo de clasificación que estima la probabilidad de que un tren llegue con más de 5 minutos de retraso. El modelo se publica como **API REST** (FastAPI + Docker) y se consulta desde una **página web** con mapas de puntualidad.
 
-> 🚧 **Proyecto en construcción.** La sección [Estado del proyecto](#estado-del-proyecto) indica qué partes ya funcionan.
+> **Proyecto en construcción.** La sección [Estado del proyecto](#estado-del-proyecto) indica qué partes ya funcionan.
 
 ---
 
@@ -165,15 +165,47 @@ En `gold.features` la tasa de retraso es **19.0%**: Regional 20.1%, S-Bahn 11.4%
 - **Sin leakage:** cada feature se conoce *antes* de que llegue el tren. Las tasas históricas se calculan con ventanas `rangeBetween(-N, -1)` que **terminan el día anterior**, y se suavizan hacia la tasa global (`(retrasos + 20·global) / (paradas + 20)`) para que las líneas con pocas observaciones no den tasas extremas. El notebook lo verifica: en el primer día de cada estación, sin historia, la tasa es exactamente la global.
 - **Señal de las features:** correlación con el label de 0.25 a 0.30. La más fuerte es la tasa de la línea en 28 días (0.298).
 - **Codificación:** las variables categóricas (estación, tipo de tren) se indexan; la línea entra por sus tasas históricas porque tiene miles de valores distintos. Los modelos de árboles no requieren normalizar; la regresión logística sí se estandariza.
-- **Split temporal:** entrenamiento con el pasado, validación con el penúltimo mes y prueba con el último. Nunca aleatorio, para no "filtrar el futuro".
-- **Modelos:** baseline (tasa histórica de la línea) → regresión logística (Spark ML) → **LightGBM** (modelo publicado).
+- **Split temporal** (nunca aleatorio, para no "filtrar el futuro"):
+
+  | Conjunto | Periodo | Filas | % positivos |
+  |---|---|---|---|
+  | Entrenamiento | 2024-08 → 2026-08 | 44,648,435 | 19.0% |
+  | Validación (hiperparámetros y umbral) | 2026-09 | 1,825,134 | 21.0% |
+  | Prueba (se evalúa una sola vez) | 2026-10 | 1,868,679 | 20.3% |
+
+  Julio de 2024 se descarta porque las tasas de 28 días todavía no tienen historia completa.
+- **Modelos:**
+  - *Baseline:* la tasa de retraso de la línea en 28 días, usada directo como probabilidad.
+  - *Regresión logística en Spark ML:* entrenada de forma distribuida sobre 11 M filas. Las categóricas (incluidas hora y día) van con *one-hot* y las numéricas se estandarizan.
+  - ***LightGBM*** (modelo publicado): entrenado sobre una muestra de 4 M filas, con *early stopping* en validación y un grid de 2 configuraciones. Las categóricas se codifican con un vocabulario que se guarda junto al modelo para que la API use la misma codificación.
 - **Métrica principal: AUC-PR.** Las clases están desbalanceadas (la mayoría de los trenes llegan a tiempo), y AUC-PR mide qué tan bien se detecta la clase minoritaria sin dejarse inflar por los verdaderos negativos. También se reporta **F1** al umbral elegido, AUC-ROC y una curva de calibración, porque la web muestra probabilidades.
 
-> 🚧 Resultados: pendiente.
+### Resultados (conjunto de prueba, octubre 2026)
+
+| Modelo | AUC-PR | AUC-ROC | F1 | Precisión | Recall |
+|---|---|---|---|---|---|
+| Aleatorio (referencia) | 0.203 | 0.500 | — | — | — |
+| Baseline: tasa de la línea (28 días) | 0.407 | 0.705 | 0.432 | 0.350 | 0.563 |
+| Regresión logística (Spark ML) | 0.484 | 0.777 | 0.494 | 0.425 | 0.590 |
+| **LightGBM** | **0.537** | **0.802** | **0.525** | **0.462** | **0.607** |
+
+LightGBM mejora el AUC-PR en **32%** sobre el baseline. El umbral de clasificación (0.28) se eligió en validación maximizando F1. Es menor a 0.5 porque la clase positiva es minoritaria.
+
+**Calibración.** Las probabilidades del modelo coinciden con la frecuencia real, lo cual importa porque la web las muestra tal cual:
+
+| Probabilidad predicha | 5% | 15% | 25% | 35% | 45% | 55% | 65% | 75% | 84% |
+|---|---|---|---|---|---|---|---|---|---|
+| Tasa real de retraso | 5% | 15% | 24% | 33% | 43% | 54% | 65% | 76% | 87% |
+
+**Importancia de variables** (*gain*): la tasa de retraso de la estación a esa hora en los últimos 28 días (23%), la posición en la ruta (16%; el retraso se acumula a lo largo del recorrido), la estación (13%) y la tasa de la línea en 28 días (12%).
+
+**Por categoría:** el modelo es más preciso en larga distancia (AUC-PR 0.734, con 48% de retrasos) que en regional (0.481) y S-Bahn (0.365, con 12% de retrasos más aleatorios).
+
+Todas las corridas quedan en MLflow (experimento `db-delay-experiment`). El modelo está registrado en Unity Catalog como `workspace.ml.delay_classifier` (versión 1) y sus artefactos (`model.txt`, `model_meta.json`, calibración e importancia) se guardan en el Volume `ml.artifacts`.
 
 ## API del modelo
 
-> 🚧 En construcción.
+> En construcción.
 
 Servicio FastAPI empaquetado en Docker:
 
@@ -187,7 +219,7 @@ Las entradas se validan con Pydantic (rangos de hora y día, estación existente
 
 ## Aplicación web
 
-> 🚧 En construcción.
+> En construcción.
 
 Página estática con un mapa de puntualidad por estación, un mapa de los tramos donde se genera el retraso, una gráfica de tendencia y un buscador de "probabilidad de que mi tren llegue tarde". La web **llama a la API** para cada predicción y maneja tiempos de espera, reintentos y respuestas inválidas.
 
@@ -270,7 +302,7 @@ El entorno trae Python 3.12, las librerías de ingesta y el AWS CLI.
 3. Crea los esquemas y Volumes, y prueba que Databricks llega a S3. `scripts/run_notebook.py` sube los notebooks de `databricks/` a tu carpeta del workspace, los ejecuta en serverless y muestra su salida:
    ```bash
    python scripts/run_notebook.py 00_setup      # esquemas bronze/silver/gold/ml + volumes
-   python scripts/run_notebook.py 01_check_s3   # debe terminar con "✅ Conectividad OK"
+   python scripts/run_notebook.py 01_check_s3   # debe terminar con "Conectividad OK"
    ```
    Si `01_check_s3` falla por red o *timeout*, la cuenta de Free Edition no tiene salida a internet. Verifícala con LinkedIn o usa el respaldo: copiar a los Volumes desde GitHub Actions con el Databricks CLI.
 
@@ -295,7 +327,7 @@ s3://<tu-bucket>/landing/
 └── stations/db-stations.ndjson
 ```
 
-> 🚧 Pendiente: automatización mensual con `.github/workflows/ingest.yml`.
+> Pendiente: automatización mensual con `.github/workflows/ingest.yml`.
 
 ### 5. Pipeline en Databricks
 
@@ -322,15 +354,19 @@ python scripts/run_notebook.py 06_gold           # agregados, tramos, festivos y
 
 ### 6. Entrenamiento del modelo
 
-> 🚧 Pendiente.
+```bash
+python scripts/run_notebook.py 07_train          # baseline, regresión logística, LightGBM y registro en MLflow (~25 min)
+```
+
+`scripts/run_notebook.py` ejecuta los notebooks en **serverless environment version 4**, la primera que permite Spark ML (`pyspark.ml`) en serverless. Si se ejecuta desde la interfaz, hay que elegir esa versión en el panel *Environment* del notebook.
 
 ### 7. Publicar la API
 
-> 🚧 Pendiente.
+> Pendiente.
 
 ### 8. Publicar la web
 
-> 🚧 Pendiente.
+> Pendiente.
 
 ---
 
@@ -362,7 +398,7 @@ python scripts/run_notebook.py 06_gold           # agregados, tramos, festivos y
 - [x] Bronze con Auto Loader incremental
 - [x] Silver con perfil de calidad, dimensión de estaciones y tabla de calidad mensual
 - [x] Gold: agregados, tramos y features (50 M filas, sin leakage verificado)
-- [ ] Modelo con MLflow
+- [x] Modelo: baseline, regresión logística (Spark ML) y LightGBM registrados en MLflow
 - [ ] API publicada
 - [ ] Web consumiendo la API
 - [ ] Job mensual de punta a punta

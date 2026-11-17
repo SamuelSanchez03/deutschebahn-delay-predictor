@@ -32,4 +32,4 @@ print("DNS", host, "→", socket.gethostbyname(host))
 resp = s3.list_objects_v2(Bucket=BUCKET, Prefix="landing/")
 for obj in resp.get("Contents", []):
     print(f"  {obj['Key']:50s} {obj['Size'] / 1e6:8.1f} MB")
-print(f"✅ Conectividad OK: {resp.get('KeyCount', 0)} objetos en s3://{BUCKET}/landing/")
+print(f"Conectividad OK: {resp.get('KeyCount', 0)} objetos en s3://{BUCKET}/landing/")
