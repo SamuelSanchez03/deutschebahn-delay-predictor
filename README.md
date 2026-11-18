@@ -4,7 +4,7 @@ Pipeline de Big Data con arquitectura **Medallion** (Bronze → Silver → Gold)
 
 **Web:** [https://samuelsanchez03.github.io/deutschebahn-delay-predictor/](https://samuelsanchez03.github.io/deutschebahn-delay-predictor/) · **API en vivo:** [https://db-delay-api-rrbh.onrender.com/docs](https://db-delay-api-rrbh.onrender.com/docs) (Swagger) · **Colección de Postman:** [`docs/postman/`](docs/postman/db-delay-api.postman_collection.json)
 
-> **Proyecto en construcción.** La sección [Estado del proyecto](#estado-del-proyecto) indica qué partes ya funcionan.
+> El pipeline se actualiza solo cada mes: ingesta (día 2), Databricks (día 3), modelo de la API (día 4) y web (día 5). Ver [Actualización mensual](#9-actualización-mensual-automática).
 
 ---
 
@@ -21,8 +21,7 @@ Pipeline de Big Data con arquitectura **Medallion** (Bronze → Silver → Gold)
 9. [Cómo reproducir el proyecto](#cómo-reproducir-el-proyecto)
 10. [Costos](#costos)
 11. [Decisiones de diseño](#decisiones-de-diseño)
-12. [Estado del proyecto](#estado-del-proyecto)
-13. [Atribución y licencias](#atribución-y-licencias)
+12. [Atribución y licencias](#atribución-y-licencias)
 
 ---
 
@@ -306,13 +305,13 @@ db-delay-predictor/
 │   ├── aws/                  # Políticas IAM de mínimo privilegio
 │   ├── postman/              # Colección de Postman para consultar la API
 │   └── img/                  # Capturas para el README
-├── scripts/                  # Verificación de permisos de AWS y ejecución de notebooks
+├── scripts/                  # Permisos de AWS, ejecución de notebooks y creación del Job mensual
 ├── ingest/                   # Hugging Face + db-stations → S3
 ├── databricks/               # Notebooks del pipeline (Bronze, Silver, Gold, ML)
 ├── api/                      # FastAPI + Dockerfile + pruebas; model/ guarda el modelo exportado
 ├── render.yaml               # Despliegue de la API en Render
 ├── web/                      # Web estática: index.html, css/, js/; data/ se descarga de S3
-└── .github/workflows/        # Publicación de la web en GitHub Pages
+└── .github/workflows/        # Ingesta mensual, actualización del modelo y publicación de la web
 ```
 
 ---
@@ -402,7 +401,7 @@ s3://<tu-bucket>/landing/
 └── stations/db-stations.ndjson
 ```
 
-> Pendiente: automatización mensual con `.github/workflows/ingest.yml`.
+Cada mes lo hace el workflow [`ingest.yml`](.github/workflows/ingest.yml) (ver el paso 9).
 
 ### 5. Pipeline en Databricks
 
@@ -479,6 +478,26 @@ El workflow ([`.github/workflows/deploy-web.yml`](.github/workflows/deploy-web.y
 
 Para cambiar de API, edita `API_BASE` en [`web/js/config.js`](web/js/config.js).
 
+### 9. Actualización mensual automática
+
+Una vez publicado todo, el pipeline se repite cada mes sin intervención. Cada paso deja su resultado en S3 y el siguiente lo toma de ahí:
+
+| Día (UTC) | Dónde | Qué hace |
+|---|---|---|
+| 2, 04:00 | GitHub Actions · [`ingest.yml`](.github/workflows/ingest.yml) | Revisa los 2 meses más recientes en Hugging Face y sube a `landing/` solo lo nuevo o reprocesado |
+| 3, 06:00 | Databricks Job `db-delay-monthly` | `02_s3_to_volume → 03_bronze → 05_silver → 06_gold → 07_train → 08_export`, en serverless. Si una tarea falla, las siguientes no corren y Databricks avisa por correo |
+| 4, 06:00 | GitHub Actions · [`sync-model.yml`](.github/workflows/sync-model.yml) | Descarga `exports/api/`, aplica un control de calidad, corre las pruebas de la API y, si todo pasa, commitea `api/model/`. El push redespliega la API en Render |
+| 5, 06:00 | GitHub Actions · [`deploy-web.yml`](.github/workflows/deploy-web.yml) | Descarga `exports/web/` y publica la web |
+
+**Crear el Job de Databricks** (sube los notebooks y crea o actualiza el Job con su programación):
+```bash
+python scripts/create_job.py              # --run-now para ejecutarlo una vez, --paused para dejarlo en pausa
+```
+
+**Control de calidad del modelo.** El split es temporal y avanza cada mes (prueba = último mes con datos, validación = el anterior). Como el conjunto de prueba cambia, el modelo nuevo se compara con el baseline del mismo mes: solo se publica si su AUC-PR lo supera por al menos 0.03. Si no, el workflow falla y la API sigue con el modelo anterior.
+
+**Permisos.** Los tres workflows usan los secretos `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (usuario `db-gh-actions`) y `S3_BUCKET`. `sync-model.yml` necesita permiso de escritura en el repositorio (*Settings → Actions → General → Workflow permissions → Read and write*). Todos se pueden lanzar a mano desde *Actions → Run workflow*.
+
 ---
 
 ## Costos
@@ -496,24 +515,6 @@ Para cambiar de API, edita `API_BASE` en [`web/js/config.js`](web/js/config.js).
 - **Dos usuarios IAM.** Cada componente solo puede hacer lo que necesita. Si se filtra una llave, se revoca solo esa.
 - **Spark para los datos, LightGBM para el modelo publicado.** Spark procesa los cientos de millones de filas. Un modelo de Spark ML necesitaría Java y Spark para servirse, lo que da una imagen Docker de más de 1 GB; LightGBM se sirve en una imagen ligera.
 - **FastAPI + Docker.** Genera la documentación OpenAPI automáticamente y valida las entradas con Pydantic; el contenedor se puede desplegar en cualquier proveedor.
-
-## Estado del proyecto
-
-- [x] Estructura del repositorio y entorno conda
-- [x] Medición del volumen del dataset
-- [x] AWS: bucket, usuarios IAM con permisos verificados
-- [x] Databricks: secret scope, esquemas, volumes y conectividad con S3 verificada
-- [x] Ingesta a S3: 28 meses (5.3 GB)
-- [ ] GitHub Action de ingesta mensual
-- [x] Puente S3 → Volume con conversión de timestamps (210 M filas)
-- [x] Bronze con Auto Loader incremental
-- [x] Silver con perfil de calidad, dimensión de estaciones y tabla de calidad mensual
-- [x] Gold: agregados, tramos y features (50 M filas, sin leakage verificado)
-- [x] Modelo: baseline, regresión logística (Spark ML) y LightGBM registrados en MLflow
-- [x] API FastAPI + Docker con validación, OpenAPI y 16 pruebas
-- [x] API desplegada en Render (https://db-delay-api-rrbh.onrender.com)
-- [x] Web en GitHub Pages consumiendo la API (predicción, mapa, tendencias y ficha del modelo)
-- [ ] Job mensual de punta a punta
 
 ## Atribución y licencias
 

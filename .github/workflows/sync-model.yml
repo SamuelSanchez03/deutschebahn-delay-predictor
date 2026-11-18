@@ -1,0 +1,77 @@
+# Trae el modelo exportado por el Job de Databricks (s3://<bucket>/exports/api/) a api/model/.
+# Si pasa el control de calidad y las pruebas, lo commitea; el push redespliega la API en Render.
+name: Actualizar modelo de la API
+
+on:
+  schedule:
+    - cron: "0 6 4 * *"   # día 4 de cada mes (el Job de Databricks corre el día 3)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-model
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Credenciales de AWS (usuario db-gh-actions, solo lectura de exports/)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Descargar el modelo exportado
+        run: |
+          mkdir -p "$RUNNER_TEMP/model"
+          aws s3 sync "s3://${{ secrets.S3_BUCKET }}/exports/api/" "$RUNNER_TEMP/model/"
+          ls -l "$RUNNER_TEMP/model"
+
+      - name: Control de calidad del modelo nuevo
+        run: |
+          python3 - "$RUNNER_TEMP/model/model_meta.json" "api/model/model_meta.json" <<'EOF'
+          import json, sys
+          new = json.load(open(sys.argv[1]))
+          old = json.load(open(sys.argv[2]))
+          m = new["metrics_test"]
+          lgb, base = m["lightgbm"]["auc_pr"], m["baseline_route_rate_28d"]["auc_pr"]
+          print(f"Nuevo:  entrenado {new['trained_at']} · AUC-PR {lgb:.4f} (baseline {base:.4f}) · prueba {new['split']['test']}")
+          print(f"Actual: entrenado {old['trained_at']} · AUC-PR {old['metrics_test']['lightgbm']['auc_pr']:.4f}")
+          # Cada mes cambia el conjunto de prueba, así que se compara contra el baseline del mismo mes
+          if lgb < base + 0.03:
+              sys.exit(f"Modelo rechazado: AUC-PR {lgb:.4f} no supera al baseline ({base:.4f}) por al menos 0.03")
+          print("Modelo aceptado")
+          EOF
+          cp "$RUNNER_TEMP"/model/{model.txt.gz,model_meta.json,lookups.json} api/model/
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: api/requirements.txt
+
+      - name: Pruebas de la API con el modelo nuevo
+        working-directory: api
+        run: |
+          pip install -r requirements.txt pytest httpx
+          python -m pytest -q
+
+      - name: Commit y push (redespliega la API en Render)
+        run: |
+          if git diff --quiet -- api/model; then
+            echo "El modelo no cambió; nada que publicar."
+            exit 0
+          fi
+          AS_OF=$(python3 -c "import json; print(json.load(open('api/model/model_meta.json'))['split']['test']['to'])")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add api/model
+          git commit -m "Modelo actualizado: datos hasta ${AS_OF}"
+          git push

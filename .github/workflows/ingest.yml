@@ -1,0 +1,43 @@
+# Ingesta mensual: meses nuevos (o reprocesados) de Hugging Face + db-stations -> s3://<bucket>/landing/
+name: Ingesta mensual
+
+on:
+  schedule:
+    - cron: "0 4 2 * *"   # día 2 de cada mes, 04:00 UTC (el Job de Databricks corre el día 3)
+  workflow_dispatch:
+    inputs:
+      months_back:
+        description: "Meses más recientes a revisar"
+        default: "2"
+
+permissions:
+  contents: read
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Dependencias
+        run: pip install huggingface_hub boto3 requests
+
+      - name: Credenciales de AWS (usuario db-gh-actions)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      # Idempotente: solo sube un mes si no está en S3 o si su tamaño cambió.
+      # Se revisan los 2 últimos meses porque el autor del dataset a veces reprocesa el anterior.
+      - name: Hugging Face -> S3
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        run: python ingest/download_to_s3.py --months-back "${{ inputs.months_back || '2' }}"
