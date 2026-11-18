@@ -321,7 +321,8 @@ db-delay-predictor/
 ### Requisitos
 - Cuenta de **AWS** (S3 + IAM)
 - Cuenta de **Databricks Free Edition**, verificada con LinkedIn para habilitar la salida a internet
-- Cuenta de **GitHub**
+- Cuenta de **GitHub** (repositorio público para usar GitHub Pages y Actions)
+- Cuenta de **Render** (plan gratuito), conectada a GitHub para desplegar la API
 - **Conda** (Miniconda o Anaconda), **git** y **Docker**
 
 ### 1. Clonar y crear el entorno
