@@ -1,13 +1,14 @@
 {
   "info": {
     "name": "DB Delay Predictor API",
-    "description": "Consultas a la API de predicción de retrasos de Deutsche Bahn.\n\nCambia la variable `baseUrl` de la colección a la URL de Render (p. ej. `https://db-delay-api-xxxx.onrender.com`) o déjala en `http://localhost:8000`.\n\nEn el plan gratuito de Render la primera petición tras un rato sin uso tarda ~30–60 s.",
+    "description": "Consultas a la API de predicción de retrasos de Deutsche Bahn.\n\nLa variable `baseUrl` apunta a la API en Render (https://db-delay-api-rrbh.onrender.com). Cámbiala a `http://localhost:8000` para probar localmente.\n\nEn el plan gratuito de Render la primera petición tras un rato sin uso tarda ~30–60 s.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     {
       "key": "baseUrl",
-      "value": "http://localhost:8000"
+      "value": "https://db-delay-api-rrbh.onrender.com",
+      "description": "URL de la API. Para correrla localmente usa http://localhost:8000"
     },
     {
       "key": "eva",

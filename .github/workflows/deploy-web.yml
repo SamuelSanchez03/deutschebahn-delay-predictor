@@ -1,0 +1,48 @@
+# Publica web/ en GitHub Pages con los datos más recientes de s3://<bucket>/exports/web/
+name: Publicar web
+
+on:
+  push:
+    branches: [main]
+    paths: ["web/**", ".github/workflows/deploy-web.yml"]
+  schedule:
+    - cron: "0 6 5 * *"   # día 5 de cada mes, después del pipeline mensual
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Credenciales de AWS (usuario db-gh-actions, solo lectura de exports/)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Descargar datos de la web desde S3
+        run: |
+          aws s3 sync "s3://${{ secrets.S3_BUCKET }}/exports/web/" web/data/ --delete --exclude ".gitkeep"
+          test -s web/data/stations.json && test -s web/data/model.json
+          echo "Archivos: $(find web/data -type f | wc -l)"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - id: deployment
+        uses: actions/deploy-pages@v4

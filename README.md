@@ -2,6 +2,8 @@
 
 Pipeline de Big Data con arquitectura **Medallion** (Bronze → Silver → Gold) sobre **más de 200 millones de registros** de paradas de trenes en Alemania. El pipeline entrena un modelo de clasificación que estima la probabilidad de que un tren llegue con más de 5 minutos de retraso. El modelo se publica como **API REST** (FastAPI + Docker) y se consulta desde una **página web** con mapas de puntualidad.
 
+**Web:** [https://samuelsanchez03.github.io/db-delay-predictor/](https://samuelsanchez03.github.io/db-delay-predictor/) · **API en vivo:** [https://db-delay-api-rrbh.onrender.com/docs](https://db-delay-api-rrbh.onrender.com/docs) (Swagger) · **Colección de Postman:** [`docs/postman/`](docs/postman/db-delay-api.postman_collection.json)
+
 > **Proyecto en construcción.** La sección [Estado del proyecto](#estado-del-proyecto) indica qué partes ya funcionan.
 
 ---
@@ -205,7 +207,7 @@ Todas las corridas quedan en MLflow (experimento `db-delay-experiment`). El mode
 
 ## API del modelo
 
-Servicio **FastAPI** empaquetado en **Docker** (`api/`) y desplegado en Render. Carga el modelo LightGBM (`model.txt.gz`), sus metadatos y las tablas de consulta (`lookups.json`) que genera `08_export`. Con eso **reconstruye las mismas features que en el entrenamiento** a partir de una consulta simple: mismo orden, mismo vocabulario y misma convención de día de la semana que Spark.
+Servicio **FastAPI** empaquetado en **Docker** (`api/`) y desplegado en Render: **https://db-delay-api-rrbh.onrender.com** (documentación en [`/docs`](https://db-delay-api-rrbh.onrender.com/docs)). Carga el modelo LightGBM (`model.txt.gz`), sus metadatos y las tablas de consulta (`lookups.json`) que genera `08_export`. Con eso **reconstruye las mismas features que en el entrenamiento** a partir de una consulta simple: mismo orden, mismo vocabulario y misma convención de día de la semana que Spark.
 
 | Endpoint | Método | Descripción |
 |---|---|---|
@@ -225,12 +227,12 @@ Servicio **FastAPI** empaquetado en **Docker** (`api/`) y desplegado en Render. 
 
 ### Consultar la API
 
-**Desde el navegador (Swagger).** Abre `https://<tu-servicio>.onrender.com/docs`, elige un endpoint, presiona *Try it out*, edita el ejemplo y *Execute*. Muestra la petición, el `curl` equivalente y la respuesta.
+**Desde el navegador (Swagger).** Abre `https://db-delay-api-rrbh.onrender.com/docs`, elige un endpoint, presiona *Try it out*, edita el ejemplo y *Execute*. Muestra la petición, el `curl` equivalente y la respuesta.
 
 **Desde Postman.** El repositorio incluye una colección lista: [`docs/postman/db-delay-api.postman_collection.json`](docs/postman/db-delay-api.postman_collection.json).
 
 1. En Postman: *Import* → arrastra el archivo de la colección.
-2. Abre la colección → pestaña *Variables* → cambia `baseUrl` a la URL de Render (o deja `http://localhost:8000` si la corres localmente) → *Save*.
+2. Abre la colección → pestaña *Variables* → `baseUrl` ya apunta a `https://db-delay-api-rrbh.onrender.com`; cámbiala a `http://localhost:8000` si corres la API localmente → *Save*.
 3. Ejecuta las peticiones en orden:
 
    | Carpeta | Peticiones | Qué verifica |
@@ -243,12 +245,12 @@ Servicio **FastAPI** empaquetado en **Docker** (`api/`) y desplegado en Render. 
 
 Variables de la colección: `baseUrl`, `eva` (por defecto `8000105`, Frankfurt Hbf), `route_key` y `date`. Para consultar otra estación, cambia `eva` y vuelve a ejecutar *Líneas de una estación*.
 
-*Alternativa sin la colección:* Postman también puede importar la especificación directamente. *Import* → pega `https://<tu-servicio>.onrender.com/openapi.json` → Postman genera una petición por endpoint con sus esquemas.
+*Alternativa sin la colección:* Postman también puede importar la especificación directamente. *Import* → pega `https://db-delay-api-rrbh.onrender.com/openapi.json` → Postman genera una petición por endpoint con sus esquemas.
 
 **Desde la terminal (`curl`):**
 ```bash
-curl https://<tu-servicio>.onrender.com/stations/8000105/routes
-curl -X POST https://<tu-servicio>.onrender.com/predict -H "Content-Type: application/json" \
+curl https://db-delay-api-rrbh.onrender.com/stations/8000105/routes
+curl -X POST https://db-delay-api-rrbh.onrender.com/predict -H "Content-Type: application/json" \
      -d '{"eva": "8000105", "route_key": "S7", "date": "2026-11-20", "hour": 8}'
 ```
 
@@ -271,9 +273,28 @@ Los errores no previstos devuelven `500` con un JSON genérico, sin exponer deta
 
 ## Aplicación web
 
-> En construcción.
+Página estática (HTML, CSS y JavaScript sin *build*) publicada en GitHub Pages. Usa [Leaflet](https://leafletjs.com/) para el mapa y [ECharts](https://echarts.apache.org/) para las gráficas. Tiene cuatro vistas:
 
-Página estática con un mapa de puntualidad por estación, un mapa de los tramos donde se genera el retraso, una gráfica de tendencia y un buscador de "probabilidad de que mi tren llegue tarde". La web **llama a la API** para cada predicción y maneja tiempos de espera, reintentos y respuestas inválidas.
+| Vista | Qué muestra | Fuente |
+|---|---|---|
+| **Predicción** | Formulario estación → línea → fecha → hora. Devuelve la probabilidad de retraso, el nivel de riesgo, la curva de probabilidad a lo largo del día y la puntualidad reciente de la estación | **API** (`/stations/{eva}/routes`, `/predict`, `/predict/hourly`) |
+| **Mapa de puntualidad** | Las 131 estaciones del modelo coloreadas por puntualidad o retraso medio (últimos 30 días), ranking y ficha de cada estación con enlace a la predicción | `data/stations.json` |
+| **Tendencias** | Puntualidad mensual por tipo de tren (28 meses) y mapa de calor día × hora de las últimas 12 semanas | `data/trends_monthly.json`, `data/heatmap.json` |
+| **Sobre el modelo** | Pipeline, comparación de modelos, hiperparámetros, importancia de variables y curva de calibración | `data/model.json` |
+
+**La predicción siempre se pide a la API**; la web no tiene una copia del modelo. Los archivos de `data/` son agregados que exporta `08_export` y que el workflow de despliegue descarga de S3.
+
+**Manejo de errores** (`web/js/api.js`):
+
+| Situación | Comportamiento |
+|---|---|
+| La API tarda (servidor dormido en Render) | Tiempo de espera de 90 s en la primera consulta y aviso de "despertando la API" |
+| *Timeout*, error de red o `5xx` | Hasta 3 reintentos con espera exponencial (1.5 s, 3 s, 6 s), con aviso en pantalla |
+| `422` / `404` | Sin reintento; muestra el mensaje de validación de la API (campo y motivo) |
+| Respuesta con forma inesperada | Se valida cada respuesta (por ejemplo, que `probability` esté entre 0 y 1) y se muestra un error en lugar de datos incorrectos |
+| Formulario incompleto o fecha fuera de rango | Validación en el navegador antes de llamar a la API |
+
+El estado de la API (`/health`) aparece en la barra lateral. Para probar la web contra una API local: `http://localhost:8000/?api=http://localhost:8001`.
 
 ## Estructura del repositorio
 
@@ -290,8 +311,8 @@ db-delay-predictor/
 ├── databricks/               # Notebooks del pipeline (Bronze, Silver, Gold, ML)
 ├── api/                      # FastAPI + Dockerfile + pruebas; model/ guarda el modelo exportado
 ├── render.yaml               # Despliegue de la API en Render
-├── web/                      # HTML + JS + CSS
-└── .github/workflows/        # Ingesta mensual y deploy
+├── web/                      # Web estática: index.html, css/, js/; data/ se descarga de S3
+└── .github/workflows/        # Publicación de la web en GitHub Pages
 ```
 
 ---
@@ -442,7 +463,21 @@ docker run -p 8000:8000 db-delay-api              # http://localhost:8000/docs
 
 ### 8. Publicar la web
 
-> Pendiente.
+**Probar localmente:** descarga los datos que exportó `08_export` y sirve la carpeta `web/`:
+```bash
+aws s3 sync s3://<tu-bucket>/exports/web/ web/data/ --profile db-gh-actions
+python -m http.server 8000 --directory web       # http://localhost:8000
+```
+La API permite peticiones (CORS) desde `localhost:8000` y desde GitHub Pages. Si publicas la web en otro dominio, agrégalo a la variable `ALLOWED_ORIGINS` del servicio en Render.
+
+**GitHub Pages:**
+1. En el repositorio: *Settings → Secrets and variables → Actions* → agrega `AWS_ACCESS_KEY_ID` y `AWS_SECRET_ACCESS_KEY` (las del usuario `db-gh-actions`) y `S3_BUCKET`.
+2. *Settings → Pages → Source*: **GitHub Actions**.
+3. Ejecuta el workflow *Publicar web* (*Actions → Publicar web → Run workflow*). También corre en cada push que cambie `web/` y el día 5 de cada mes.
+
+El workflow ([`.github/workflows/deploy-web.yml`](.github/workflows/deploy-web.yml)) descarga `exports/web/` de S3 a `web/data/` y publica la carpeta. Los datos no se guardan en el repositorio.
+
+Para cambiar de API, edita `API_BASE` en [`web/js/config.js`](web/js/config.js).
 
 ---
 
@@ -476,12 +511,14 @@ docker run -p 8000:8000 db-delay-api              # http://localhost:8000/docs
 - [x] Gold: agregados, tramos y features (50 M filas, sin leakage verificado)
 - [x] Modelo: baseline, regresión logística (Spark ML) y LightGBM registrados en MLflow
 - [x] API FastAPI + Docker con validación, OpenAPI y 16 pruebas
-- [ ] API desplegada en Render
-- [ ] Web consumiendo la API
+- [x] API desplegada en Render (https://db-delay-api-rrbh.onrender.com)
+- [x] Web en GitHub Pages consumiendo la API (predicción, mapa, tendencias y ficha del modelo)
 - [ ] Job mensual de punta a punta
 
 ## Atribución y licencias
 
 - Datos de trenes: Deutsche Bahn, vía [piebro/deutsche-bahn-data](https://github.com/piebro/deutsche-bahn-data) (CC BY 4.0).
 - Coordenadas de estaciones: [db-stations](https://github.com/derhuerst/db-stations) (CC BY 4.0).
-- Mapas: © OpenStreetMap contributors, © CARTO.
+- Mapas: © OpenStreetMap contributors.
+- Tipografía: [Fira Sans](https://fonts.google.com/specimen/Fira+Sans) (SIL Open Font License). Iconos: Material Symbols (Apache 2.0).
+- Proyecto académico, sin afiliación con Deutsche Bahn.

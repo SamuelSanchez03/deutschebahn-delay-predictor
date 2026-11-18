@@ -173,7 +173,59 @@ print(f"Web: {len(st30)} estaciones · {len(seg)} tramos · {tr['eva'].nunique()
 
 # COMMAND ----------
 
-# MAGIC %md ## 3. Copia al Volume y subida a S3
+# MAGIC %md
+# MAGIC ## 3. Tendencias y ficha del modelo
+# MAGIC
+# MAGIC Todo se calcula sobre `gold.features` (las 131 estaciones del modelo, sin buses ni cancelaciones).
+
+# COMMAND ----------
+
+import csv
+import mlflow
+
+feat = spark.table("workspace.gold.features").filter(F.col("service_date") <= F.lit(last_date))
+
+# Puntualidad mensual por categoría de tren (toda la historia)
+monthly = (feat.groupBy(F.date_format("service_date", "yyyy-MM").alias("month"), "train_category")
+    .agg(F.count("*").alias("n"), F.round(1 - F.avg("label"), 4).alias("pct_on_time"),
+         F.round(F.avg("delay_in_min"), 2).alias("avg_delay"))
+    .filter("n >= 1000").orderBy("month").toPandas())
+dump(monthly.to_dict("records"), f"{OUT}/web/trends_monthly.json")
+
+# Mapa de calor día × hora (últimas 12 semanas), total y por categoría
+recent = feat.filter(F.col("service_date") > F.date_sub(F.lit(last_date), 84))
+def heat(d):
+    return (d.groupBy("dow", "hour").agg(F.count("*").alias("n"), F.round(F.avg("label"), 4).alias("rate"))
+             .orderBy("dow", "hour").toPandas().to_dict("records"))
+heatmap = {"from": str(recent.agg(F.min("service_date")).first()[0]), "to": str(last_date),
+           "all": heat(recent),
+           "by_category": {c: heat(recent.filter(F.col("train_category") == c))
+                           for c in ["Larga distancia", "Regional", "S-Bahn"]}}
+dump(heatmap, f"{OUT}/web/heatmap.json")
+
+# Ficha del modelo: métricas, split, hiperparámetros, importancia y calibración
+mlflow.set_tracking_uri("databricks")
+params = mlflow.get_run(meta["mlflow_run_id"]).data.params
+importance = [{"feature": r[0], "gain": float(r[1])}
+              for r in list(csv.reader(open(f"{ART}/feature_importance.csv")))[1:]]
+calibration = [{k: float(v) for k, v in r.items()} for r in csv.DictReader(open(f"{ART}/calibration_test.csv"))]
+counts = {"bronze_rows": spark.table("workspace.bronze.train_stops").count(),
+          "silver_rows": silver.count(), "feature_rows": feat.count(),
+          "stations_total": silver.select("eva").distinct().count(), "model_stations": len(st30)}
+model_card = {
+    "updated_at": str(last_date), "label": meta["label"], "threshold": meta["threshold"],
+    "metrics_test": meta["metrics_test"], "split": meta["split"], "global_rate": g,
+    "best_iteration": meta["best_iteration"],
+    "params": {k: params[k] for k in ["learning_rate", "num_leaves", "min_child_samples", "subsample",
+                                      "colsample_bytree", "reg_lambda", "train_rows"] if k in params},
+    "importance": importance, "calibration": calibration, "counts": counts}
+dump(model_card, f"{OUT}/web/model.json")
+print(f"Tendencias: {monthly['month'].nunique()} meses · mapa de calor {heatmap['from']} → {heatmap['to']}")
+print("Conteos:", counts)
+
+# COMMAND ----------
+
+# MAGIC %md ## 4. Copia al Volume y subida a S3
 
 # COMMAND ----------
 
