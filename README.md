@@ -2,7 +2,7 @@
 
 Pipeline de Big Data con arquitectura **Medallion** (Bronze → Silver → Gold) sobre **más de 200 millones de registros** de paradas de trenes en Alemania. El pipeline entrena un modelo de clasificación que estima la probabilidad de que un tren llegue con más de 5 minutos de retraso. El modelo se publica como **API REST** (FastAPI + Docker) y se consulta desde una **página web** con mapas de puntualidad.
 
-**Web:** [https://samuelsanchez03.github.io/db-delay-predictor/](https://samuelsanchez03.github.io/db-delay-predictor/) · **API en vivo:** [https://db-delay-api-rrbh.onrender.com/docs](https://db-delay-api-rrbh.onrender.com/docs) (Swagger) · **Colección de Postman:** [`docs/postman/`](docs/postman/db-delay-api.postman_collection.json)
+**Web:** [https://samuelsanchez03.github.io/deutschebahn-delay-predictor/](https://samuelsanchez03.github.io/deutschebahn-delay-predictor/) · **API en vivo:** [https://db-delay-api-rrbh.onrender.com/docs](https://db-delay-api-rrbh.onrender.com/docs) (Swagger) · **Colección de Postman:** [`docs/postman/`](docs/postman/db-delay-api.postman_collection.json)
 
 > **Proyecto en construcción.** La sección [Estado del proyecto](#estado-del-proyecto) indica qué partes ya funcionan.
 
@@ -328,8 +328,8 @@ db-delay-predictor/
 ### 1. Clonar y crear el entorno
 
 ```bash
-git clone https://github.com/<usuario>/db-delay-predictor.git
-cd db-delay-predictor
+git clone https://github.com/<usuario>/deutschebahn-delay-predictor.git
+cd deutschebahn-delay-predictor
 conda env create -f environment.yml
 conda activate db-delays
 ```

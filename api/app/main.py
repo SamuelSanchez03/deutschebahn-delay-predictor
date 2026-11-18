@@ -42,7 +42,7 @@ app = FastAPI(
         "principales de Alemania. AUC-PR en prueba: 0.537 (baseline: 0.407).\n\n"
         "Flujo típico: `GET /stations` → `GET /stations/{eva}/routes` → `POST /predict`."),
     lifespan=lifespan,
-    contact={"name": "db-delay-predictor", "url": "https://github.com/SamuelSanchez03/db-delay-predictor"},
+    contact={"name": "db-delay-predictor", "url": "https://github.com/SamuelSanchez03/deutschebahn-delay-predictor"},
     license_info={"name": "Datos: CC BY 4.0 (Deutsche Bahn vía piebro/deutsche-bahn-data)"},
 )
 app.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=["GET", "POST"], allow_headers=["*"])
