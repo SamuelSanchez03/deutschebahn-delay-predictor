@@ -1,0 +1,20 @@
+# Blueprint de Render: despliega la API como servicio web con Docker (plan gratuito).
+# Render -> New -> Blueprint -> seleccionar este repositorio.
+services:
+  - type: web
+    name: db-delay-api
+    runtime: docker
+    plan: free
+    region: frankfurt
+    rootDir: api
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true                 # cada push a main (p. ej. un modelo nuevo) redespliega la API
+    buildFilter:
+      paths: ["api/**"]              # solo redespliega si cambia algo dentro de api/
+    envVars:
+      - key: ALLOWED_ORIGINS
+        value: https://samuelsanchez03.github.io,http://localhost:8000,http://127.0.0.1:8000
+      - key: MAX_DAYS_AHEAD
+        value: "180"

@@ -4,9 +4,7 @@
 web/data/*
 !web/data/.gitkeep
 
-# Artefactos del modelo (se descargan de MLflow/S3 al construir la imagen)
-api/model/*
-!api/model/.gitkeep
+# Los artefactos del modelo (api/model/) SÍ se versionan: los actualiza GitHub Actions desde S3
 
 # Python
 .venv/

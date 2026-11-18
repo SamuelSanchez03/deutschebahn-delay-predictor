@@ -1,0 +1,482 @@
+{
+  "info": {
+    "name": "DB Delay Predictor API",
+    "description": "Consultas a la API de predicción de retrasos de Deutsche Bahn.\n\nCambia la variable `baseUrl` de la colección a la URL de Render (p. ej. `https://db-delay-api-xxxx.onrender.com`) o déjala en `http://localhost:8000`.\n\nEn el plan gratuito de Render la primera petición tras un rato sin uso tarda ~30–60 s.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000"
+    },
+    {
+      "key": "eva",
+      "value": "8000105",
+      "description": "Frankfurt (Main) Hbf"
+    },
+    {
+      "key": "route_key",
+      "value": "S7"
+    },
+    {
+      "key": "date",
+      "value": "2026-11-20"
+    }
+  ],
+  "item": [
+    {
+      "name": "1 · Estado y catálogo",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "Estado del servicio, versión del modelo y fecha de los datos. Úsalo primero para 'despertar' el servicio en Render.",
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"status ok\", () => pm.expect(pm.response.json().status).to.eql(\"ok\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Estaciones",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "Lista de estaciones con su número EVA.",
+            "url": {
+              "raw": "{{baseUrl}}/stations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "stations"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"131 estaciones\", () => pm.expect(pm.response.json().length).to.eql(131));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Líneas de una estación",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "description": "Líneas que pasan por la estación `{{eva}}`. Guarda la más frecuente en la variable `route_key`.",
+            "url": {
+              "raw": "{{baseUrl}}/stations/{{eva}}/routes",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "stations",
+                "{{eva}}",
+                "routes"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test(\"hay líneas\", () => pm.expect(r.length).to.be.above(0));",
+                  "// Guarda la línea más frecuente para las siguientes peticiones",
+                  "pm.collectionVariables.set(\"route_key\", r[0].route_key);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2 · Predicción",
+      "item": [
+        {
+          "name": "Predecir retraso",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Probabilidad de que un tren de `route_key` llegue a `eva` con más de 5 min de retraso en `date` a las `hour`.",
+            "url": {
+              "raw": "{{baseUrl}}/predict",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "predict"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eva\": \"{{eva}}\",\n  \"route_key\": \"{{route_key}}\",\n  \"date\": \"{{date}}\",\n  \"hour\": 8\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test(\"probabilidad entre 0 y 1\", () => pm.expect(b.probability).to.be.within(0, 1));",
+                  "pm.test(\"delayed coherente con el umbral\", () => pm.expect(b.delayed).to.eql(b.probability >= b.threshold));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Predicción por hora del día",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Probabilidad para cada hora en que la línea suele pasar por la estación.",
+            "url": {
+              "raw": "{{baseUrl}}/predict/hourly",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "predict",
+                "hourly"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eva\": \"{{eva}}\",\n  \"route_key\": \"{{route_key}}\",\n  \"date\": \"{{date}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+                  "pm.test(\"lista de horas\", () => pm.expect(pm.response.json().hours.length).to.be.above(0));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3 · Validación de entradas (deben fallar con 422)",
+      "item": [
+        {
+          "name": "Hora fuera de rango",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "{{baseUrl}}/predict",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "predict"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eva\": \"{{eva}}\",\n  \"route_key\": \"{{route_key}}\",\n  \"date\": \"{{date}}\",\n  \"hour\": 25\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"422 entrada inválida\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"explica el error\", () => pm.expect(pm.response.text()).to.include(\"less_than_equal\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "EVA con formato inválido",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "{{baseUrl}}/predict",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "predict"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eva\": \"abc\",\n  \"route_key\": \"{{route_key}}\",\n  \"date\": \"{{date}}\",\n  \"hour\": 8\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"422 entrada inválida\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"explica el error\", () => pm.expect(pm.response.text()).to.include(\"string_pattern_mismatch\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Estación desconocida",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "{{baseUrl}}/predict",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "predict"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eva\": \"1234567\",\n  \"route_key\": \"{{route_key}}\",\n  \"date\": \"{{date}}\",\n  \"hour\": 8\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"422 entrada inválida\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"explica el error\", () => pm.expect(pm.response.text()).to.include(\"estación desconocida\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Línea que no pasa por la estación",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "{{baseUrl}}/predict",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "predict"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eva\": \"{{eva}}\",\n  \"route_key\": \"XYZ 999\",\n  \"date\": \"{{date}}\",\n  \"hour\": 8\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"422 entrada inválida\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"explica el error\", () => pm.expect(pm.response.text()).to.include(\"no pasa por la estación\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Fecha fuera del horizonte",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "{{baseUrl}}/predict",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "predict"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eva\": \"{{eva}}\",\n  \"route_key\": \"{{route_key}}\",\n  \"date\": \"2020-01-01\",\n  \"hour\": 8\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"422 entrada inválida\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"explica el error\", () => pm.expect(pm.response.text()).to.include(\"la fecha debe estar entre\"));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Campo faltante (sin hour)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "",
+            "url": {
+              "raw": "{{baseUrl}}/predict",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "predict"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eva\": \"{{eva}}\",\n  \"route_key\": \"{{route_key}}\",\n  \"date\": \"{{date}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"422 entrada inválida\", () => pm.response.to.have.status(422));",
+                  "pm.test(\"explica el error\", () => pm.expect(pm.response.text()).to.include(\"missing\"));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -205,17 +205,69 @@ Todas las corridas quedan en MLflow (experimento `db-delay-experiment`). El mode
 
 ## API del modelo
 
-> En construcción.
-
-Servicio FastAPI empaquetado en Docker:
+Servicio **FastAPI** empaquetado en **Docker** (`api/`) y desplegado en Render. Carga el modelo LightGBM (`model.txt.gz`), sus metadatos y las tablas de consulta (`lookups.json`) que genera `08_export`. Con eso **reconstruye las mismas features que en el entrenamiento** a partir de una consulta simple: mismo orden, mismo vocabulario y misma convención de día de la semana que Spark.
 
 | Endpoint | Método | Descripción |
 |---|---|---|
-| `/predict` | POST | Recibe estación, tipo de tren, línea, día y hora; devuelve la probabilidad de retraso |
-| `/health` | GET | Estado del servicio y versión del modelo |
-| `/docs` | GET | Documentación interactiva (Swagger / OpenAPI) |
+| `/health` | GET | Estado, versión del modelo y fecha de los datos |
+| `/stations` | GET | Las 131 estaciones del modelo |
+| `/stations/{eva}/routes` | GET | Líneas que pasaron por la estación en las últimas 4 semanas, con sus horarios |
+| `/predict` | POST | Probabilidad de retraso > 5 min para una estación, línea, fecha y hora |
+| `/predict/hourly` | POST | Probabilidad para cada hora en que pasa la línea (para graficar) |
+| `/docs` · `/openapi.json` | GET | Documentación interactiva (Swagger) y especificación OpenAPI |
 
-Las entradas se validan con Pydantic (rangos de hora y día, estación existente), y las peticiones inválidas reciben un `422` con el detalle del error.
+**Ejemplo de respuesta** de `POST /predict`:
+```json
+{"eva": "8000105", "station": "Frankfurt (Main) Hbf", "route_key": "S7", "train_type": "S",
+ "date": "2026-11-20", "hour": 8, "probability": 0.1494, "delayed": false, "threshold": 0.2822,
+ "risk": "bajo", "usual_service": true, "is_holiday": false, "data_as_of": "2026-10-31", "model_version": "1.0.0"}
+```
+
+### Consultar la API
+
+**Desde el navegador (Swagger).** Abre `https://<tu-servicio>.onrender.com/docs`, elige un endpoint, presiona *Try it out*, edita el ejemplo y *Execute*. Muestra la petición, el `curl` equivalente y la respuesta.
+
+**Desde Postman.** El repositorio incluye una colección lista: [`docs/postman/db-delay-api.postman_collection.json`](docs/postman/db-delay-api.postman_collection.json).
+
+1. En Postman: *Import* → arrastra el archivo de la colección.
+2. Abre la colección → pestaña *Variables* → cambia `baseUrl` a la URL de Render (o deja `http://localhost:8000` si la corres localmente) → *Save*.
+3. Ejecuta las peticiones en orden:
+
+   | Carpeta | Peticiones | Qué verifica |
+   |---|---|---|
+   | 1 · Estado y catálogo | Health, Estaciones, Líneas de una estación | Que el servicio responda; guarda la línea más frecuente de la estación en la variable `route_key` |
+   | 2 · Predicción | Predecir retraso, Predicción por hora del día | Probabilidad entre 0 y 1, coherente con el umbral |
+   | 3 · Validación de entradas | 6 peticiones inválidas | Que cada una responda `422` con el motivo del error |
+
+4. Para correr todo de una vez: clic derecho en la colección → *Run collection* → *Run*. Cada petición trae *tests*, y el resumen muestra cuáles pasaron.
+
+Variables de la colección: `baseUrl`, `eva` (por defecto `8000105`, Frankfurt Hbf), `route_key` y `date`. Para consultar otra estación, cambia `eva` y vuelve a ejecutar *Líneas de una estación*.
+
+*Alternativa sin la colección:* Postman también puede importar la especificación directamente. *Import* → pega `https://<tu-servicio>.onrender.com/openapi.json` → Postman genera una petición por endpoint con sus esquemas.
+
+**Desde la terminal (`curl`):**
+```bash
+curl https://<tu-servicio>.onrender.com/stations/8000105/routes
+curl -X POST https://<tu-servicio>.onrender.com/predict -H "Content-Type: application/json" \
+     -d '{"eva": "8000105", "route_key": "S7", "date": "2026-11-20", "hour": 8}'
+```
+
+> En el plan gratuito de Render, la primera petición después de 15 minutos sin uso tarda ~30–60 s mientras el servicio arranca. Las siguientes responden en milisegundos.
+
+**Validación de entradas** (Pydantic). Las peticiones inválidas reciben `422` con el campo y el motivo:
+
+| Caso | Respuesta |
+|---|---|
+| EVA con formato inválido (`"abc"`) | `string_pattern_mismatch` |
+| Estación fuera del modelo | `estación desconocida` |
+| Línea que no pasa por esa estación | `la línea '…' no pasa por la estación …` |
+| Fecha fuera del horizonte (desde el día siguiente a los datos y hasta 180 días después) | `la fecha debe estar entre …` |
+| Hora fuera de 0–23 o con tipo incorrecto | `less_than_equal` / `int_parsing` |
+| Campo faltante | `missing` |
+
+Los errores no previstos devuelven `500` con un JSON genérico, sin exponer detalles internos. La API también indica si la línea suele pasar a esa hora (`usual_service`) y si la fecha es festivo en el estado de la estación (`is_holiday`).
+
+**Pruebas:** `api/tests/test_api.py` (16 pruebas: respuestas válidas, cada caso de validación, documentación OpenAPI y la convención de día de la semana).
 
 ## Aplicación web
 
@@ -231,11 +283,13 @@ db-delay-predictor/
 ├── environment.yml           # Entorno conda local
 ├── docs/
 │   ├── aws/                  # Políticas IAM de mínimo privilegio
+│   ├── postman/              # Colección de Postman para consultar la API
 │   └── img/                  # Capturas para el README
 ├── scripts/                  # Verificación de permisos de AWS y ejecución de notebooks
 ├── ingest/                   # Hugging Face + db-stations → S3
 ├── databricks/               # Notebooks del pipeline (Bronze, Silver, Gold, ML)
-├── api/                      # FastAPI + Dockerfile
+├── api/                      # FastAPI + Dockerfile + pruebas; model/ guarda el modelo exportado
+├── render.yaml               # Despliegue de la API en Render
 ├── web/                      # HTML + JS + CSS
 └── .github/workflows/        # Ingesta mensual y deploy
 ```
@@ -348,6 +402,8 @@ python scripts/run_notebook.py 06_gold           # agregados, tramos, festivos y
 | `04_bronze_profile` | Mide duplicados, nulos por columna, distribución de retrasos, cancelaciones, tipos de tren y formato de EVA. Justifica las reglas de Silver |
 | `05_silver` | Limpieza, columnas derivadas, estaciones core, dimensión de estaciones y tabla de calidad mensual |
 | `06_gold` | Agregados por estación y línea, tramos, estaciones del modelo, festivos por estado y tabla de features con chequeo anti-leakage |
+| `07_train` | Split temporal, baseline, regresión logística (Spark ML), LightGBM y registro en MLflow |
+| `08_export` | Tablas de consulta y modelo para la API, archivos JSON para la web, y subida a S3 |
 
 > **Nota sobre tipos de dato.** Los parquet originales (escritos con DuckDB) guardan las horas como `INT64 TIMESTAMP(NANOS)`. Spark solo maneja microsegundos, y en serverless no se puede activar `spark.sql.legacy.parquet.nanosAsLong`, así que la lectura directa falla con `PARQUET_TYPE_ILLEGAL`. El puente convierte esas columnas con `pyarrow` al copiarlas al Volume. La conversión no pierde información (los horarios tienen precisión de minutos) y S3 conserva los archivos originales sin modificar.
 
@@ -362,7 +418,27 @@ python scripts/run_notebook.py 07_train          # baseline, regresión logísti
 
 ### 7. Publicar la API
 
-> Pendiente.
+Exporta el modelo y las tablas de consulta a S3, y cópialos a `api/model/`:
+```bash
+python scripts/run_notebook.py 08_export          # model.txt.gz, model_meta.json, lookups.json + archivos de la web
+aws s3 sync s3://<tu-bucket>/exports/api/ api/model/ --profile db-gh-actions
+```
+
+**Probar localmente** (con conda, o con Docker):
+```bash
+conda create -n db-api python=3.12 && conda activate db-api
+pip install -r api/requirements.txt pytest httpx
+cd api && python -m pytest -q                     # 16 pruebas
+uvicorn app.main:app --port 8000                  # http://localhost:8000/docs
+```
+```bash
+docker build -t db-delay-api api/
+docker run -p 8000:8000 db-delay-api              # http://localhost:8000/docs
+```
+
+**Desplegar en Render:** *New → Blueprint* → selecciona el repositorio. `render.yaml` define un servicio web Docker en el plan gratuito con *health check* en `/health`. Cada push que cambie `api/` (por ejemplo, un modelo nuevo) redespliega la API.
+
+> En el plan gratuito, el servicio se suspende tras 15 minutos sin tráfico, y la primera petición después de eso tarda ~30–60 s en responder. La web lo considera: muestra un aviso y reintenta.
 
 ### 8. Publicar la web
 
@@ -392,14 +468,15 @@ python scripts/run_notebook.py 07_train          # baseline, regresión logísti
 - [x] Medición del volumen del dataset
 - [x] AWS: bucket, usuarios IAM con permisos verificados
 - [x] Databricks: secret scope, esquemas, volumes y conectividad con S3 verificada
-- [x] Script de ingesta a S3 (probado con 2024-07)
+- [x] Ingesta a S3: 28 meses (5.3 GB)
 - [ ] GitHub Action de ingesta mensual
 - [x] Puente S3 → Volume con conversión de timestamps (210 M filas)
 - [x] Bronze con Auto Loader incremental
 - [x] Silver con perfil de calidad, dimensión de estaciones y tabla de calidad mensual
 - [x] Gold: agregados, tramos y features (50 M filas, sin leakage verificado)
 - [x] Modelo: baseline, regresión logística (Spark ML) y LightGBM registrados en MLflow
-- [ ] API publicada
+- [x] API FastAPI + Docker con validación, OpenAPI y 16 pruebas
+- [ ] API desplegada en Render
 - [ ] Web consumiendo la API
 - [ ] Job mensual de punta a punta
 
