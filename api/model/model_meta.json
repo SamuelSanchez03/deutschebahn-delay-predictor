@@ -244,9 +244,9 @@
    "vlx"
   ]
  },
- "threshold": 0.2822,
+ "threshold": 0.2874,
  "label": "delay_in_min > 5",
- "global_rate": 0.18954991825906187,
+ "global_rate": 0.18972455146156572,
  "split": {
   "train": {
    "rows": 44648435,
@@ -278,19 +278,19 @@
   "spark_logistic_regression": {
    "auc_pr": 0.4836,
    "auc_roc": 0.7765,
-   "f1": 0.4936,
-   "precision": 0.4246,
-   "recall": 0.5895
+   "f1": 0.4937,
+   "precision": 0.4252,
+   "recall": 0.5885
   },
   "lightgbm": {
-   "auc_pr": 0.5373,
+   "auc_pr": 0.5387,
    "auc_roc": 0.8016,
-   "f1": 0.5246,
-   "precision": 0.4616,
-   "recall": 0.6074
+   "f1": 0.5244,
+   "precision": 0.4663,
+   "recall": 0.5991
   }
  },
- "best_iteration": 699,
- "trained_at": "2026-11-16T22:30:51Z",
- "mlflow_run_id": "7faaae0fa7274580a29d44ddf47e12fc"
+ "best_iteration": 822,
+ "trained_at": "2026-11-18T05:17:28Z",
+ "mlflow_run_id": "8f509543056846de9f0ef508b5ae52f0"
 }
